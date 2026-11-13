@@ -39,6 +39,7 @@ jobs:
   sign:
     needs: build
     uses: kkolodziejczak/gh-release-signing/.github/workflows/sign.yml@main
+    secrets: inherit    # without it the job sees no secrets, not even its environment's
     permissions:
       contents: read
       id-token: write   # lets sign.yml find its own commit and check out its scripts

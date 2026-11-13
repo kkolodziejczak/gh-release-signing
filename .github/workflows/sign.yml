@@ -2,8 +2,9 @@ name: Sign release files
 
 # Reusable signing job. A calling repository needs a code-signing environment
 # with the owner as required reviewer and the CERTUM_EMAIL and MAILBOX_TOKEN
-# secrets; see README.md. The caller must grant id-token: write so this job can
-# find its own commit and check out the scripts that belong to it.
+# secrets; see README.md. The caller must pass secrets: inherit (otherwise this
+# job sees no secrets, not even its environment's) and grant id-token: write so
+# this job can find its own commit and check out the scripts that belong to it.
 on:
   workflow_call:
     inputs:
