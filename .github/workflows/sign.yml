@@ -1,0 +1,146 @@
+name: Sign release files
+
+# Reusable signing job. A calling repository needs a code-signing environment
+# with the owner as required reviewer and the CERTUM_EMAIL and MAILBOX_TOKEN
+# secrets; see README.md. The caller must grant id-token: write so this job can
+# find its own commit and check out the scripts that belong to it.
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Artifact that holds the unsigned files.
+        required: true
+        type: string
+      files:
+        description: File name pattern to sign inside the artifact, searched in every folder.
+        required: false
+        type: string
+        default: "*.exe"
+      signed-artifact:
+        description: Artifact to upload every file of the input artifact to, with the matching files signed.
+        required: false
+        type: string
+        default: signed-release
+      retention-days:
+        description: How long the signed artifact is kept.
+        required: false
+        type: number
+        default: 7
+    outputs:
+      thumbprint:
+        description: Thumbprint of the certificate the files were signed with.
+        value: ${{ jobs.sign.outputs.thumbprint }}
+
+jobs:
+  sign:
+    name: Sign release files
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # The approval gate: only the owner can start this job, and its secrets exist only here.
+    environment: code-signing
+    # One signing job at a time per repository: logout removes that repository's leftover mailboxes.
+    concurrency:
+      group: code-signing
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Certum "Open Source Developer" code-signing certificate (SimplySign). Update after each yearly renewal.
+      SIGNING_CERT_THUMBPRINT: CFBAA0C626ABF4BAD8FEC533B9F36860011CA1C1
+      RELEASE_FILES: release-files
+    outputs:
+      thumbprint: ${{ steps.sign.outputs.thumbprint }}
+
+    steps:
+      # The github context belongs to the calling repository; only the job's OIDC token names this workflow's commit.
+      - name: Find the signing scripts' commit
+        id: self
+        shell: pwsh
+        run: |
+          if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL) { throw "Grant this job 'id-token: write' in the calling workflow." }
+          $response = Invoke-RestMethod -Uri "$env:ACTIONS_ID_TOKEN_REQUEST_URL&audience=gh-release-signing" -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }
+          $payload = $response.value.Split('.')[1].Replace('-', '+').Replace('_', '/')
+          $payload += '=' * ((4 - $payload.Length % 4) % 4)
+          $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
+          if ($claims.job_workflow_ref -notmatch '^([^/]+/[^/]+)/\.github/workflows/sign\.yml@') {
+            throw "Unexpected job_workflow_ref '$($claims.job_workflow_ref)'."
+          }
+          Write-Host "Signing scripts: $($claims.job_workflow_ref) at $($claims.job_workflow_sha)"
+          "repository=$($Matches[1])" | Add-Content -Path $env:GITHUB_OUTPUT
+          "sha=$($claims.job_workflow_sha)" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Check out the signing scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ steps.self.outputs.repository }}
+          ref: ${{ steps.self.outputs.sha }}
+          path: .release-signing
+          persist-credentials: false
+
+      - name: Download the unsigned files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ env.RELEASE_FILES }}
+
+      - name: Install SimplySign Desktop
+        shell: pwsh
+        run: .\.release-signing\scripts\SimplySign-Ci.ps1 -Install
+
+      - name: Open the SimplySign login window
+        shell: pwsh
+        run: .\.release-signing\scripts\SimplySign-Ci.ps1 -OpenLogin
+
+      # Approve-ReleaseSigning.ps1 finds this step by the text after the emoji; keep it in sync.
+      - name: "📬 Waiting for your SimplySign code"
+        shell: pwsh
+        env:
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          MAILBOX_TOKEN: ${{ secrets.MAILBOX_TOKEN }}
+        run: .\.release-signing\scripts\SimplySign-Ci.ps1 -WaitAndLogin
+
+      - name: Sign and verify the files
+        id: sign
+        shell: pwsh
+        env:
+          FILES: ${{ inputs.files }}
+        run: |
+          $files = @(Get-ChildItem -LiteralPath $env:RELEASE_FILES -Recurse -File -Filter $env:FILES | ForEach-Object FullName)
+          if ($files.Count -eq 0) { throw "No file in the artifact matches '$env:FILES'." }
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1 -ExpandProperty FullName
+          # Retry while the SimplySign session is still open: the timestamp server occasionally fails a request.
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & $signtool sign /sha1 $env:SIGNING_CERT_THUMBPRINT /fd sha256 /tr http://time.certum.pl /td sha256 $files
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw "signtool sign failed three times; last exit code $LASTEXITCODE." }
+            Start-Sleep -Seconds (10 * $attempt)
+          }
+          & $signtool verify /pa $files
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed with exit code $LASTEXITCODE." }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $env:SIGNING_CERT_THUMBPRINT) {
+              throw "'$file' signature is '$($signature.Status)' from '$($signature.SignerCertificate.Subject)'; expected certificate $env:SIGNING_CERT_THUMBPRINT."
+            }
+            # Without a timestamp the signature would stop validating when the certificate expires.
+            if ($null -eq $signature.TimeStamperCertificate) { throw "'$file' signature has no timestamp." }
+          }
+          Write-Host "Signed and verified $($files.Count) file(s)."
+          "thumbprint=$env:SIGNING_CERT_THUMBPRINT" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Keep the signed files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.signed-artifact }}
+          path: ${{ env.RELEASE_FILES }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+      - name: Empty the mailbox and stop SimplySign
+        if: always()
+        shell: pwsh
+        env:
+          MAILBOX_TOKEN: ${{ secrets.MAILBOX_TOKEN }}
+        run: .\.release-signing\scripts\SimplySign-Ci.ps1 -Logout

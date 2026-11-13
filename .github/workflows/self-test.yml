@@ -1,0 +1,66 @@
+name: Self-test signing
+
+# Signs a tiny throwaway executable through sign.yml exactly as a release would.
+# Run it after changing the scripts or renewing the certificate:
+#   gh workflow run self-test.yml; gh release-signing approve -Workflow self-test.yml
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build a test executable
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Compile hello.exe
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path unsigned | Out-Null
+          Add-Type -TypeDefinition 'public static class Hello { public static void Main() { System.Console.WriteLine("signed"); } }' -OutputAssembly unsigned\hello.exe -OutputType ConsoleApplication
+
+      - name: Keep the unsigned executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-self-test
+          path: unsigned/hello.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: build
+    uses: ./.github/workflows/sign.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      artifact: unsigned-self-test
+      signed-artifact: signed-self-test
+      retention-days: 1
+
+  check:
+    name: Run the signed executable
+    needs: sign
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download the signed executable
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-self-test
+          path: signed
+
+      - name: Check the signature and run it
+        shell: pwsh
+        env:
+          THUMBPRINT: ${{ needs.sign.outputs.thumbprint }}
+        run: |
+          $signature = Get-AuthenticodeSignature -LiteralPath signed\hello.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $env:THUMBPRINT) {
+            throw "hello.exe signature is '$($signature.Status)' from '$($signature.SignerCertificate.Subject)'."
+          }
+          Write-Host "Signed by $($signature.SignerCertificate.Subject), valid until $($signature.SignerCertificate.NotAfter.ToString('u'))."
+          $output = & .\signed\hello.exe
+          if ($output -ne 'signed') { throw "hello.exe printed '$output'." }

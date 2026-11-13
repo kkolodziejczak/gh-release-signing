@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# gh extension entry point: gh release-signing approve [-Tag vX.Y.Z] [-RunId <id>] [-Workflow <file>]
+# Run it from the folder of the repository whose release you are signing.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && (pwd -W 2>/dev/null || pwd))"
+case "${1:-}" in
+  approve)
+    shift
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here/Approve-ReleaseSigning.ps1" "$@"
+    ;;
+  *)
+    echo "usage: gh release-signing approve [-Tag vX.Y.Z] [-RunId <id>] [-Workflow <file>]" >&2
+    exit 2
+    ;;
+esac
