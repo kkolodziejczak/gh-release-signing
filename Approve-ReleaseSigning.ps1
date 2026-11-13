@@ -5,7 +5,7 @@ Approves the signing job of a release run and sends it your SimplySign code.
 .DESCRIPTION
 Run it from the folder of the repository whose release you are signing; it
 follows that repository's release run on GitHub. When the run waits for the
-code-signing approval it shows what the run builds and asks you to approve;
+code-signing approval it shows what the run builds and asks you to approve (no rejects the run);
 when the signing job waits for the phone code it asks for the code (shown as
 you type) and puts it in that run attempt's own SIMPLYSIGN_CODE_<run id>_<attempt>
 mailbox, then confirms the runner picked it up (see README.md). Requires an
@@ -196,7 +196,18 @@ while ((Get-Date) -lt $deadline) {
                 'Approve only if this is the release you meant to sign.')
             $answer = Read-Host 'Approve signing this build? [y/N]'
             if ($answer -notmatch '^(y|yes)$') {
-                Show-Banner -Kind Failure -Title 'not approved' -Lines @('The run keeps waiting. Reject or approve it on GitHub, or run gh release-signing approve again.')
+                # No means stop: reject the deployment so the run ends and frees the signing queue.
+                $body = @{ environment_ids = @($pending[0].environment.id); state = 'rejected'; comment = 'Rejected with gh release-signing' } | ConvertTo-Json -Compress
+                try {
+                    Invoke-Gh -Arguments @('api', '-X', 'POST', "repos/$repository/actions/runs/$RunId/pending_deployments", '--input', '-') -InputText $body | Out-Null
+                    Show-Banner -Kind Failure -Title 'signing rejected' -Lines @('The run stops without signing anything.', "Run: $runUrl")
+                }
+                catch {
+                    Show-Banner -Kind Failure -Title 'rejection failed' -Lines @(
+                        "GitHub refused the rejection: $($_.Exception.Message)",
+                        'A fine-grained gh token needs Deployments: Read and write for this.',
+                        "The run is still waiting. Reject it on $runUrl")
+                }
                 return
             }
 

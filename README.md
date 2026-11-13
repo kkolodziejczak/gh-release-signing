@@ -82,7 +82,8 @@ Push the release tag, then run this in the repository's folder and keep the wind
 gh release-signing approve -Tag vX.Y.Z
 ```
 
-It shows the run's event, ref, commit and actor and asks you to approve. With `-Tag`, it refuses a
+It shows the run's event, ref, commit and actor and asks you to approve. Answering anything but `y` rejects
+the signing deployment, so the run stops without signing. With `-Tag`, it refuses a
 run that is not the push of that tag. About a minute later it beeps and asks for the SimplySign
 phone code, shown as you type it to catch typos. If the runner does not pick the code up within
 30 seconds, it withdraws the code and asks for a fresh one.
